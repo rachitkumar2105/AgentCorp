@@ -1,0 +1,3 @@
+"""
+Workflow Engine — Package initialization.
+"""

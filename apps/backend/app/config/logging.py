@@ -1,17 +1,10 @@
 import logging
-
-
-LOG_FORMAT = (
-    "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-)
+from app.observability.logging import setup_structured_logging, get_logger as get_structured_logger
 
 
 def setup_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format=LOG_FORMAT,
-    )
+    setup_structured_logging(sink="stdout")
 
 
 def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger(name)
+    return get_structured_logger(name)

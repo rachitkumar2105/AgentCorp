@@ -32,9 +32,7 @@ from app.api.v1 import memory as memory_v1
 from app.api.v1 import workflow as workflow_v1
 from app.api.v1 import agent_engine as agent_engine_v1
 from app.api.v1 import multi_agent as multi_agent_v1
-
-
-
+from app.api.v1 import observability as observability_v1
 
 
 
@@ -43,6 +41,9 @@ api_router = APIRouter()
 
 api_router.include_router(root.router)
 api_router.include_router(health.router)
+
+# Observability APIs (Metrics, Audit logs, Diagnostics)
+api_router.include_router(observability_v1.router, prefix="/api/v1")
 
 # Authentication
 api_router.include_router(auth.router)

@@ -9,7 +9,7 @@ from app.config.settings import settings
 from app.core.lifespan import lifespan
 from app.exceptions.handlers import register_exception_handlers
 from app.middleware.cors import register_cors
-from app.middleware.request_logger import request_logger
+from app.observability.middleware import ObservabilityMiddleware
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -24,8 +24,8 @@ register_exception_handlers(app)
 # Register CORS middleware
 register_cors(app)
 
-# Register request logging middleware
-app.middleware("http")(request_logger)
+# Register observability middleware
+app.add_middleware(ObservabilityMiddleware)
 
 # Register all API routes
 app.include_router(api_router)

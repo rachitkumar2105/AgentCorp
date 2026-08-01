@@ -5,6 +5,7 @@ Workflow Engine — Database models.
 from __future__ import annotations
 
 from datetime import datetime
+import sqlalchemy as sa
 from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, Float, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 

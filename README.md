@@ -841,7 +841,7 @@ This project is licensed under the terms of the [LICENSE](LICENSE) file included
 
 ## Author
 
-**Rachit Kumar**
+**Rachit Kumar Singh**
 
 Email: rachitkumar2105@gmail.com
 

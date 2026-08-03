@@ -18,9 +18,9 @@ class AuthService:
         self,
         payload: RegisterRequest,
     ) -> User:
-        existing = self.repository.get_by_email(
-            payload.email
-        )
+        # Normalize email for case-insensitive uniqueness
+        email_normalized = payload.email.strip().lower()
+        existing = self.repository.get_by_email(email_normalized)
 
         if existing:
             raise HTTPException(
@@ -28,9 +28,16 @@ class AuthService:
                 detail="Email already exists.",
             )
 
+        # Password policy: minimum length 8 characters
+        if len(payload.password) < 8:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password must be at least 8 characters long.",
+            )
+
         user = User(
             full_name=payload.full_name,
-            email=payload.email,
+            email=email_normalized,
             password_hash=hash_password(
                 payload.password
             ),
@@ -43,12 +50,21 @@ class AuthService:
         email: str,
         password: str,
     ) -> str:
-        user = self.repository.get_by_email(email)
+        # Normalize email for case‑insensitive lookup
+        email_normalized = email.strip().lower()
+        user = self.repository.get_by_email(email_normalized)
 
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials.",
+            )
+
+        # Ensure the user account is active
+        if not user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Inactive user.",
             )
 
         if not verify_password(

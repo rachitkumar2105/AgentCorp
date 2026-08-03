@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.workflow import Workflow, WorkflowNode, WorkflowEdge, WorkflowExecution, WorkflowStep
@@ -19,6 +20,8 @@ from app.services.chat_service import ChatService
 from app.services.tool_service import ToolService
 from app.services.memory_service import MemoryService
 from app.services.rag_service import RAGService
+from app.services.tool_execution_service import ToolExecutionService
+from app.schemas.tool_execution import ToolCallRequest
 from app.workflow.transition import TransitionEngine
 from app.workflow.validator import WorkflowValidator
 
@@ -136,17 +139,55 @@ class WorkflowService:
             execution.current_node_id = current_node.id
             self.execution_repo.update(execution)
 
+            step_started = datetime.now(timezone.utc)
+            node_output: dict[str, Any] = {}
+            status = "COMPLETED"
+            error_message = None
+            retries_used = 0
+            try:
+                node_output, retries_used = await self._execute_node(
+                    current_node,
+                    execution,
+                    organization_id,
+                    agent_id,
+                    current_user,
+                )
+                execution.execution_context = self._merge_execution_context(
+                    execution.execution_context,
+                    current_node,
+                    node_output,
+                )
+            except Exception as exc:
+                status = "FAILED"
+                error_message = str(exc)
+                execution.execution_context = self._merge_execution_context(
+                    execution.execution_context,
+                    current_node,
+                    {"success": False, "error": error_message},
+                )
+
             # Record step execution audit log
             step = WorkflowStep(
                 execution_id=execution.id,
                 node_id=current_node.id,
-                status="COMPLETED",
-                started_at=datetime.now(timezone.utc),
+                status=status,
+                input_data=current_node.configuration or {},
+                output_data=node_output,
+                retries=retries_used,
+                error_message=error_message,
+                started_at=step_started,
                 completed_at=datetime.now(timezone.utc),
-                latency_seconds=0.0,
+                latency_seconds=(datetime.now(timezone.utc) - step_started).total_seconds(),
             )
             self.db.add(step)
             self.db.commit()
+
+            if status == "FAILED":
+                execution.status = "FAILED"
+                execution.completed_at = datetime.now(timezone.utc)
+                execution.duration = time.perf_counter() - start_time
+                self.execution_repo.update(execution)
+                return execution
 
             if current_node.node_type.lower() == "end":
                 break
@@ -165,6 +206,91 @@ class WorkflowService:
         self.execution_repo.update(execution)
 
         return execution
+
+    async def _execute_node(
+        self,
+        node: WorkflowNode,
+        execution: WorkflowExecution,
+        organization_id: int,
+        agent_id: int,
+        current_user: User,
+    ) -> tuple[dict[str, Any], int]:
+        config = node.configuration or {}
+        node_type = node.node_type.lower()
+        attempts = int((node.retry_policy or {}).get("max_retries", 0)) + 1
+        last_error: Exception | None = None
+
+        for attempt in range(attempts):
+            try:
+                if node_type in {"start", "end"}:
+                    return {"success": True, "node_type": node_type}, attempt
+                if node_type in {"memory", "memory_search"}:
+                    service = MemoryService(self.db)
+                    memories = await service.retrieve_memories(
+                        org_id=organization_id,
+                        agent_id=agent_id,
+                        query=config.get("query") or execution.execution_context.get("objective", ""),
+                        top_k=config.get("top_k", 5),
+                    )
+                    return {
+                        "success": True,
+                        "memories": [
+                            {"id": memory.id, "title": memory.title, "content": memory.content}
+                            for memory in memories
+                        ],
+                    }, attempt
+                if node_type in {"rag", "knowledge", "knowledge_search"}:
+                    kb_id = config.get("kb_id") or config.get("knowledge_base_id")
+                    if kb_id is None:
+                        return {"success": False, "placeholder": True, "reason": "RAG node requires kb_id in configuration."}, attempt
+                    context = await RAGService(self.db).retrieve_context(
+                        kb_id=kb_id,
+                        query=config.get("query") or execution.execution_context.get("objective", ""),
+                        top_k=config.get("top_k", 5),
+                        max_tokens=config.get("max_tokens", 2000),
+                    )
+                    return {"success": True, "context": context}, attempt
+                if node_type in {"tool", "tool_call", "execute_tool"}:
+                    tool_name = config.get("tool_name") or config.get("name")
+                    if not tool_name:
+                        return {"success": False, "placeholder": True, "reason": "Tool node requires tool_name in configuration."}, attempt
+                    result = await ToolExecutionService(self.db).execute_batch(
+                        requests=[
+                            ToolCallRequest(
+                                call_id=str(config.get("call_id") or f"workflow-{execution.id}-{node.id}"),
+                                tool_name=tool_name,
+                                arguments=config.get("arguments", {}),
+                            )
+                        ],
+                        current_user=current_user,
+                        organization_id=organization_id,
+                        agent_id=agent_id,
+                        conversation_id=execution.conversation_id or 0,
+                    )
+                    return {"success": result.all_succeeded, "tool_results": [r.model_dump() for r in result.results]}, attempt
+                return {"success": True, "placeholder": True, "reason": f"No executable runtime is registered for node type '{node.node_type}'."}, attempt
+            except Exception as exc:
+                last_error = exc
+                if attempt == attempts - 1:
+                    raise
+
+        raise last_error or RuntimeError("Workflow node execution failed.")
+
+    def _merge_execution_context(
+        self,
+        context: dict[str, Any] | None,
+        node: WorkflowNode,
+        output: dict[str, Any],
+    ) -> dict[str, Any]:
+        updated = dict(context or {})
+        variables = dict(updated.get("variables") or {})
+        variables["status"] = "completed" if output.get("success") else "failed"
+        variables[node.name] = output
+        updated["variables"] = variables
+        updated.setdefault("node_history", []).append(
+            {"node_id": node.id, "node_name": node.name, "node_type": node.node_type, "output": output}
+        )
+        return updated
 
     def pause_execution(self, org_id: int, execution_id: int) -> WorkflowExecution:
         """Pause a running workflow."""

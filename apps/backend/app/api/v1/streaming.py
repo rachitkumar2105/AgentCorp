@@ -40,10 +40,10 @@ from fastapi.responses import StreamingResponse
 
 from app.dependencies.auth import get_current_active_user
 from app.dependencies.permissions import RequirePermission
-from app.dependencies.streaming import get_streaming_service
+from app.dependencies.runtime import get_runtime_router
 from app.models.user import User
 from app.schemas.streaming import StreamingChatRequest
-from app.services.streaming_service import StreamingService
+from app.runtime.router import RuntimeRouter
 from app.utils.stream_events import format_error_event, get_metrics_snapshot
 
 logger = logging.getLogger("streaming_api")
@@ -90,7 +90,7 @@ async def stream_chat(
     request: Request,
     organization_id: int = Query(..., description="Organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    streaming_service: StreamingService = Depends(get_streaming_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> StreamingResponse:
     """
     POST /api/v1/chat/stream
@@ -114,10 +114,11 @@ async def stream_chat(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            async for event in streaming_service.stream_new_chat(
+            async for event in runtime_router.execute_stream(
                 payload=payload,
                 current_user=current_user,
                 organization_id=organization_id,
+                runtime_version=payload.runtime_version,
             ):
                 # Check for client disconnect before forwarding each chunk
                 if await request.is_disconnected():
@@ -173,7 +174,7 @@ async def stream_continue_chat(
     request: Request,
     organization_id: int = Query(..., description="Organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    streaming_service: StreamingService = Depends(get_streaming_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> StreamingResponse:
     """
     POST /api/v1/chat/{conversation_id}/stream
@@ -191,11 +192,12 @@ async def stream_continue_chat(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            async for event in streaming_service.stream_continue_chat(
+            async for event in runtime_router.execute_stream(
                 conversation_id=conversation_id,
                 payload=payload,
                 current_user=current_user,
                 organization_id=organization_id,
+                runtime_version=payload.runtime_version,
             ):
                 if await request.is_disconnected():
                     logger.info(

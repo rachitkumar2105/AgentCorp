@@ -130,3 +130,53 @@ async def get_audit_logs(
     Retrieve paginated audit logs. RBAC protected.
     """
     return audit_service.get_audit_logs(skip=skip, limit=limit, organization_id=organization_id)
+
+
+@router.get(
+    "/runtime/observatory",
+    dependencies=[Depends(RequirePermission("operations:read"))],
+)
+async def get_runtime_observatory(
+    service: ObservabilityServiceDependency,
+) -> Any:
+    """Return a live runtime observatory snapshot."""
+    return await service.get_runtime_observatory()
+
+
+@router.get(
+    "/runtime/architecture",
+    dependencies=[Depends(RequirePermission("operations:read"))],
+)
+async def get_runtime_architecture(
+    service: ObservabilityServiceDependency,
+) -> Any:
+    """Return the static architecture graph used by the runtime."""
+    return service.get_runtime_architecture()
+
+
+@router.get(
+    "/runtime/search",
+    dependencies=[Depends(RequirePermission("operations:read"))],
+)
+async def search_runtime_observability(
+    service: ObservabilityServiceDependency,
+    request_id: str | None = Query(None),
+    execution_id: str | None = Query(None),
+    goal_id: str | None = Query(None),
+    task_id: str | None = Query(None),
+    runtime_version: str | None = Query(None),
+    provider: str | None = Query(None),
+    workflow: str | None = Query(None),
+    capability: str | None = Query(None),
+) -> Any:
+    """Search the runtime observability model deterministically."""
+    return await service.search_runtime_observability(
+        request_id=request_id,
+        execution_id=execution_id,
+        goal_id=goal_id,
+        task_id=task_id,
+        runtime_version=runtime_version,
+        provider=provider,
+        workflow=workflow,
+        capability=capability,
+    )

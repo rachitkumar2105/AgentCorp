@@ -10,7 +10,7 @@ schemas so the rest of the application remains provider-agnostic.
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class MessageRole(str, Enum):
@@ -78,7 +78,7 @@ class ChatRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    model: str
+    model: str = "default"
 
     messages: list[ChatMessage]
 
@@ -125,13 +125,28 @@ class ChatResponse(BaseModel):
 
     model: str
 
-    message: ChatMessage
+    message: ChatMessage | None = None
+
+    provider: str | None = None
+
+    content: str | None = None
 
     finish_reason: str | None = None
 
     usage: Usage | None = None
 
     tool_calls: list[ToolCall] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def normalize_message(self) -> "ChatResponse":
+        if self.message is None:
+            self.message = ChatMessage(
+                role=MessageRole.ASSISTANT,
+                content=self.content or "",
+            )
+        if self.content is None:
+            self.content = self.message.content
+        return self
 
 
 class EmbeddingRequest(BaseModel):
@@ -186,4 +201,4 @@ class StreamChunk(BaseModel):
     index: int = 0
     finish_reason: str | None = None
     usage: Usage | None = None
-    model: str = ""
+    model: str = ""

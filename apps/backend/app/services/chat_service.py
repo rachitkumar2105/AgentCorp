@@ -28,7 +28,7 @@ from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.message import Message
 from app.models.user import User
-from app.providers.schemas import ChatRequest, Usage
+from app.providers.schemas import ChatMessage, ChatRequest, MessageRole, ToolDefinition, ToolParameter, Usage
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
@@ -44,8 +44,13 @@ from app.schemas.chat import (
     UsageSchema,
 )
 from app.services.context_builder import ContextBuilder
+from app.services.knowledge_service import KnowledgeService
+from app.services.memory_service import MemoryService
 from app.services.prompt_builder import PromptBuilder
 from app.services.provider_service import ProviderService
+from app.services.rag_service import RAGService
+from app.services.tool_execution_service import ToolExecutionService
+from app.schemas.tool_execution import ToolCallRequest, ToolMetadata
 
 logger = logging.getLogger("chat_service")
 
@@ -67,6 +72,10 @@ class ChatService:
         provider_service: ProviderService,
         context_builder: ContextBuilder,
         prompt_builder: PromptBuilder,
+        memory_service: MemoryService | None = None,
+        knowledge_service: KnowledgeService | None = None,
+        rag_service: RAGService | None = None,
+        tool_execution_service: ToolExecutionService | None = None,
     ) -> None:
         self._conversations = conversation_repo
         self._messages = message_repo
@@ -74,6 +83,10 @@ class ChatService:
         self._provider_service = provider_service
         self._context_builder = context_builder
         self._prompt_builder = prompt_builder
+        self._memory_service = memory_service
+        self._knowledge_service = knowledge_service
+        self._rag_service = rag_service
+        self._tool_execution_service = tool_execution_service
 
     # ------------------------------------------------------------------
     # Public interface
@@ -113,6 +126,7 @@ class ChatService:
             agent_id=agent.id,
             user_id=current_user.id,
             title=payload.message[:100],  # sensible default title
+            runtime_version=payload.runtime_version,
         )
         conversation = self._conversations.create(conversation)
 
@@ -308,6 +322,7 @@ class ChatService:
         return ConversationDetailSchema(
             conversation_id=conversation.id,
             title=conversation.title,
+            runtime_version=getattr(conversation, "runtime_version", None),
             agent_id=conversation.agent_id,
             organization_id=conversation.organization_id,
             user_id=conversation.user_id,
@@ -414,6 +429,11 @@ class ChatService:
         #    This ensures the current user turn is not duplicated in context.
         history_before = self._messages.get_by_conversation(conversation.id)
         context = self._context_builder.build_context(history_before)
+        runtime_context = self._build_runtime_context(
+            organization_id=conversation.organization_id,
+            agent_id=agent.id,
+            user_message=user_message,
+        )
 
         # 2. Persist user message (skipped for regenerate/retry)
         if persist_user_message:
@@ -427,6 +447,9 @@ class ChatService:
             system_prompt=agent.system_prompt,
             history=context,
             new_user_message=user_message,
+            memory_context=runtime_context["memory_context"],
+            knowledge_context=runtime_context["knowledge_context"],
+            tool_context=runtime_context["tool_context"],
         )
 
         # 4. Resolve model
@@ -440,6 +463,7 @@ class ChatService:
             temperature=resolved_temperature,
             max_tokens=resolved_max_tokens,
             top_p=top_p,
+            tools=runtime_context["tools"],
         )
 
         # 5. Execute via ProviderService (the AI Orchestrator)
@@ -475,6 +499,17 @@ class ChatService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"AI provider execution failed: {exc}",
             ) from exc
+
+        if ai_response.tool_calls and self._tool_execution_service is not None:
+            ai_response = self._execute_tool_loop(
+                initial_request=chat_request,
+                initial_response=ai_response,
+                current_user_id=conversation.user_id,
+                organization_id=conversation.organization_id,
+                agent_id=agent.id,
+                conversation_id=conversation.id,
+                provider_override=provider_override,
+            )
 
         latency = time.perf_counter() - start_ts
 
@@ -518,6 +553,7 @@ class ChatService:
         # 8. Build and return response
         return ChatResponseSchema(
             conversation_id=conversation.id,
+            runtime_version=getattr(conversation, "runtime_version", None),
             assistant_message=AssistantMessageSchema(
                 id=assistant_msg.id,
                 role="assistant",
@@ -541,6 +577,172 @@ class ChatService:
             created_at=assistant_msg.created_at,
         )
 
+    def _build_runtime_context(
+        self,
+        *,
+        organization_id: int,
+        agent_id: int,
+        user_message: str,
+    ) -> dict:
+        memory_context = self._retrieve_memory_context(
+            organization_id=organization_id,
+            agent_id=agent_id,
+            query=user_message,
+        )
+        knowledge_context = self._retrieve_knowledge_context(
+            organization_id=organization_id,
+            query=user_message,
+        )
+        tool_metadata = self._discover_tool_metadata(
+            agent_id=agent_id,
+            organization_id=organization_id,
+        )
+
+        return {
+            "memory_context": memory_context,
+            "knowledge_context": knowledge_context,
+            "tool_context": self._format_tool_context(tool_metadata),
+            "tools": self._to_provider_tool_definitions(tool_metadata),
+        }
+
+    def _retrieve_memory_context(self, *, organization_id: int, agent_id: int, query: str) -> str | None:
+        if self._memory_service is None:
+            return None
+        try:
+            memories = _run_async(
+                self._memory_service.retrieve_memories(
+                    org_id=organization_id,
+                    agent_id=agent_id,
+                    query=query,
+                    top_k=5,
+                )
+            )
+        except Exception as exc:
+            logger.warning("memory retrieval skipped | org_id=%s agent_id=%s error=%s", organization_id, agent_id, exc)
+            return None
+        if not memories:
+            return None
+        return "\n".join(f"- {m.title}: {m.content}" if m.title else f"- {m.content}" for m in memories)
+
+    def _retrieve_knowledge_context(self, *, organization_id: int, query: str) -> str | None:
+        if self._knowledge_service is None or self._rag_service is None:
+            return None
+        try:
+            knowledge_bases = self._knowledge_service.list_knowledge_bases(organization_id)
+        except Exception as exc:
+            logger.warning("knowledge base discovery skipped | org_id=%s error=%s", organization_id, exc)
+            return None
+
+        contexts: list[str] = []
+        for kb in knowledge_bases:
+            try:
+                context = _run_async(
+                    self._rag_service.retrieve_context(
+                        kb_id=kb.id,
+                        query=query,
+                        top_k=5,
+                        max_tokens=2000,
+                    )
+                )
+            except Exception as exc:
+                logger.warning("rag retrieval skipped | org_id=%s kb_id=%s error=%s", organization_id, kb.id, exc)
+                continue
+            if context:
+                contexts.append(f"Knowledge base: {kb.name}\n{context}")
+
+        return "\n\n".join(contexts) if contexts else None
+
+    def _discover_tool_metadata(self, *, agent_id: int, organization_id: int) -> list[ToolMetadata]:
+        if self._tool_execution_service is None:
+            return []
+        try:
+            return self._tool_execution_service.discover_agent_tools(
+                agent_id=agent_id,
+                organization_id=organization_id,
+                current_user=_ServiceUserProxy(),
+            )
+        except Exception as exc:
+            logger.warning("tool discovery skipped | org_id=%s agent_id=%s error=%s", organization_id, agent_id, exc)
+            return []
+
+    def _execute_tool_loop(
+        self,
+        *,
+        initial_request: ChatRequest,
+        initial_response,
+        current_user_id: int,
+        organization_id: int,
+        agent_id: int,
+        conversation_id: int,
+        provider_override: str | None,
+    ):
+        if self._tool_execution_service is None:
+            return initial_response
+
+        tool_requests = [
+            ToolCallRequest(
+                call_id=tool_call.id,
+                tool_name=tool_call.name,
+                arguments=tool_call.arguments,
+            )
+            for tool_call in initial_response.tool_calls
+        ]
+        if not tool_requests:
+            return initial_response
+
+        tool_result = _run_async(
+            self._tool_execution_service.execute_batch(
+                requests=tool_requests,
+                current_user=_ServiceUserProxy(id=current_user_id),
+                organization_id=organization_id,
+                agent_id=agent_id,
+                conversation_id=conversation_id,
+            )
+        )
+
+        followup_messages = list(initial_request.messages)
+        if initial_response.message.content:
+            followup_messages.append(initial_response.message)
+        for result in tool_result.results:
+            followup_messages.append(ChatMessage(
+                role=MessageRole.TOOL,
+                content=result.content,
+                name=result.tool_name,
+                tool_call_id=result.call_id,
+            ))
+
+        followup_request = initial_request.model_copy(update={"messages": followup_messages})
+        return _run_async(
+            self._provider_service.chat(
+                followup_request,
+                provider_name=provider_override,
+            )
+        )
+
+    def _format_tool_context(self, tool_metadata: list[ToolMetadata]) -> str | None:
+        if not tool_metadata:
+            return None
+        return "\n".join(f"- {tool.name}: {tool.description}" for tool in tool_metadata)
+
+    def _to_provider_tool_definitions(self, tool_metadata: list[ToolMetadata]) -> list[ToolDefinition]:
+        definitions: list[ToolDefinition] = []
+        for tool in tool_metadata:
+            parameters = {
+                name: ToolParameter(
+                    type=param.type,
+                    description=param.description,
+                    enum=param.enum,
+                )
+                for name, param in tool.parameters.properties.items()
+            }
+            definitions.append(ToolDefinition(
+                name=tool.name,
+                description=tool.description,
+                parameters=parameters,
+                required=tool.parameters.required,
+            ))
+        return definitions
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -550,6 +752,20 @@ class ChatService:
 def _new_request_id() -> str:
     """Generate a unique request correlation ID."""
     return str(uuid.uuid4())
+
+
+def _run_async(coro):
+    import asyncio
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+class _ServiceUserProxy:
+    def __init__(self, id: int | None = None) -> None:
+        self.id = id
+        self.is_superuser = True
 
 
 def _message_to_schema(message: Message) -> MessageSchema:

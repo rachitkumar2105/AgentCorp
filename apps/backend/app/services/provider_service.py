@@ -56,7 +56,7 @@ class ProviderService:
                 provider = provider_manager.get_provider(current_provider_name)
                 
                 # Check capability if request specifies tools
-                if request.tools and not provider.supports_tools:
+                if getattr(request, "tools", None) and not provider.supports_tools:
                     logger.warning(f"Provider {current_provider_name} does not support tools. Skipping.")
                     continue
 

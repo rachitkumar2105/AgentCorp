@@ -2,7 +2,7 @@
 Memory Engine — Memory extractor.
 """
 
-from __future__ import annotations
+
 
 
 class MemoryExtractor:
@@ -12,15 +12,27 @@ class MemoryExtractor:
 
     def extract_memories(self, conversation_history: str) -> list[dict]:
         """
-        Stub parsing logic returning mock candidates.
+        Parses the conversation history and extracts all user preference statements.
+        Returns a list of memory dicts, one per detected preference.
         """
-        # Excludes smalltalk and noise, focuses on commitments/facts
-        if "prefer" in conversation_history or "like" in conversation_history:
-            return [{
-                "title": "User preference",
-                "content": "User expressed language or operational settings preference.",
-                "importance_score": 0.6,
-                "confidence_score": 0.8,
-                "memory_type": "semantic",
-            }]
-        return []
+        import re
+        if not conversation_history:
+            return []
+        memories = []
+        # Split on sentence terminators
+        sentences = re.split(r"[.!?]+", conversation_history)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if re.search(r"\b(prefer|like)\b", sentence, re.IGNORECASE):
+                # Ensure sentence ends with a period for consistency
+                content = sentence.rstrip() + "."
+                memories.append({
+                    "title": "User preference",
+                    "content": content,
+                    "importance_score": 0.6,
+                    "confidence_score": 0.8,
+                    "memory_type": "semantic",
+                })
+        return memories

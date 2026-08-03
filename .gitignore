@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+!.env.development
+!.env.production
 
 # Python
 __pycache__/
@@ -70,3 +72,21 @@ htmlcov/
 # Misc
 *.sqlite3
 *.db
+
+# Frontend build outputs
+dist/
+build/
+tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Playwright test artifacts
+playwright-report/
+test-results/
+tests/audit/screenshots/
+
+# Scratch / temporary files
+audit.js
+
+# Coverage HTML reports
+htmlcov/
+coverage/

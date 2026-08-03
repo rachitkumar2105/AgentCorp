@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.dependencies.auth import get_current_active_user
 from app.dependencies.chat import get_chat_service
+from app.dependencies.runtime import get_runtime_router
 from app.dependencies.permissions import RequirePermission
 from app.models.user import User
 from app.schemas.chat import (
@@ -37,6 +38,7 @@ from app.schemas.chat import (
     ChatRetryRequest,
     ConversationDetailSchema,
 )
+from app.runtime.router import RuntimeRouter
 from app.services.chat_service import ChatService
 
 logger = logging.getLogger("chat_api")
@@ -69,11 +71,11 @@ _PERM_CHAT_READ = "chat:read"
         "``agent_id`` in the request body identifies which agent handles this conversation."
     ),
 )
-def create_chat(
+async def create_chat(
     payload: ChatCreateRequest,
     organization_id: int = Query(..., description="ID of the organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    chat_service: ChatService = Depends(get_chat_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> ChatResponseSchema:
     """
     Create a brand-new conversation and generate the first assistant response.
@@ -88,10 +90,11 @@ def create_chat(
         organization_id,
         payload.agent_id,
     )
-    return chat_service.create_chat(
+    return await runtime_router.execute_chat(
         payload=payload,
         current_user=current_user,
         organization_id=organization_id,
+        runtime_version=payload.runtime_version,
     )
 
 
@@ -110,12 +113,12 @@ def create_chat(
         "the next assistant response."
     ),
 )
-def continue_chat(
+async def continue_chat(
     conversation_id: int,
     payload: ChatContinueRequest,
     organization_id: int = Query(..., description="ID of the organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    chat_service: ChatService = Depends(get_chat_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> ChatResponseSchema:
     """
     Continue an existing conversation with a new user message.
@@ -129,11 +132,12 @@ def continue_chat(
         organization_id,
         conversation_id,
     )
-    return chat_service.continue_chat(
-        conversation_id=conversation_id,
+    return await runtime_router.execute_chat(
         payload=payload,
+        conversation_id=conversation_id,
         current_user=current_user,
         organization_id=organization_id,
+        runtime_version=payload.runtime_version,
     )
 
 
@@ -152,12 +156,12 @@ def continue_chat(
         "Conversation history is preserved; compatible with future branching."
     ),
 )
-def regenerate_response(
+async def regenerate_response(
     conversation_id: int,
     payload: ChatRegenerateRequest,
     organization_id: int = Query(..., description="ID of the organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    chat_service: ChatService = Depends(get_chat_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> ChatResponseSchema:
     """
     Create a new assistant message for the last user turn.
@@ -171,11 +175,12 @@ def regenerate_response(
         organization_id,
         conversation_id,
     )
-    return chat_service.regenerate_response(
-        conversation_id=conversation_id,
+    return await runtime_router.execute_chat(
         payload=payload,
+        conversation_id=conversation_id,
         current_user=current_user,
         organization_id=organization_id,
+        runtime_version=payload.runtime_version,
     )
 
 
@@ -194,12 +199,12 @@ def regenerate_response(
         "No duplicate user messages are created."
     ),
 )
-def retry_failed_message(
+async def retry_failed_message(
     conversation_id: int,
     payload: ChatRetryRequest,
     organization_id: int = Query(..., description="ID of the organisation scoping this request"),
     current_user: User = Depends(RequirePermission(_PERM_CHAT)),
-    chat_service: ChatService = Depends(get_chat_service),
+    runtime_router: RuntimeRouter = Depends(get_runtime_router),
 ) -> ChatResponseSchema:
     """
     Retry provider execution for the last failed assistant response.
@@ -213,11 +218,12 @@ def retry_failed_message(
         organization_id,
         conversation_id,
     )
-    return chat_service.retry_failed_message(
-        conversation_id=conversation_id,
+    return await runtime_router.execute_chat(
         payload=payload,
+        conversation_id=conversation_id,
         current_user=current_user,
         organization_id=organization_id,
+        runtime_version=payload.runtime_version,
     )
 
 

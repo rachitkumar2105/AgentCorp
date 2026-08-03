@@ -20,6 +20,9 @@ from app.models.multi_agent import (
     AgentInterMessage,
     AgentDelegation,
 )
+from app.models.quota_usage import QuotaUsage
+from app.models.security_policy import SecurityPolicy
+from app.models.audit_security_event import AuditSecurityEvent
 
 __all__ = [
     "BaseModel",
@@ -42,4 +45,7 @@ __all__ = [
     "MultiAgentParticipant",
     "AgentInterMessage",
     "AgentDelegation",
+    "QuotaUsage",
+    "SecurityPolicy",
+    "AuditSecurityEvent",
 ]

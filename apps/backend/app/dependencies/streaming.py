@@ -17,9 +17,13 @@ from app.repositories.agent_repository import AgentRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.services.context_builder import ContextBuilder
+from app.services.knowledge_service import KnowledgeService
+from app.services.memory_service import MemoryService
 from app.services.prompt_builder import PromptBuilder
 from app.services.provider_service import ProviderService
+from app.services.rag_service import RAGService
 from app.services.streaming_service import StreamingService
+from app.services.tool_execution_service import ToolExecutionService
 
 
 def get_streaming_service(
@@ -41,4 +45,8 @@ def get_streaming_service(
         provider_service=ProviderService(),
         context_builder=ContextBuilder(),
         prompt_builder=PromptBuilder(),
+        memory_service=MemoryService(db),
+        knowledge_service=KnowledgeService(db),
+        rag_service=RAGService(db),
+        tool_execution_service=ToolExecutionService(db),
     )

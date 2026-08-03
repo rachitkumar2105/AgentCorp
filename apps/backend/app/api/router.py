@@ -33,6 +33,7 @@ from app.api.v1 import workflow as workflow_v1
 from app.api.v1 import agent_engine as agent_engine_v1
 from app.api.v1 import multi_agent as multi_agent_v1
 from app.api.v1 import observability as observability_v1
+from app.api.v1 import security as security_v1
 
 
 
@@ -95,6 +96,9 @@ api_router.include_router(agent_engine_v1.router)
 
 # Multi-Agent Collaboration
 api_router.include_router(multi_agent_v1.router)
+
+# Security, Governance & Compliance
+api_router.include_router(security_v1.router)
 
 
 

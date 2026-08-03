@@ -48,6 +48,12 @@ class Conversation(Base, BaseModel):
         nullable=True,
     )
 
+    runtime_version: Mapped[str] = mapped_column(
+        String(50),
+        default="AgentCorp V1",
+        nullable=False,
+    )
+
     organization = relationship(
         "Organization",
         back_populates="conversations",
@@ -55,6 +61,11 @@ class Conversation(Base, BaseModel):
 
     agent = relationship(
         "Agent",
+        back_populates="conversations",
+    )
+
+    user = relationship(
+        "User",
         back_populates="conversations",
     )
 

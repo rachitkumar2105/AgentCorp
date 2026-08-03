@@ -1,0 +1,30 @@
+# pytest configuration
+[tool.pytest.ini_options]
+addopts = "--cov=app --cov-report=term-missing"
+python_files = "test_*.py"
+testpaths = ["tests"]
+markers = [
+    "unit: unit tests",
+    "integration: integration tests",
+    "e2e: end-to-end tests",
+    "performance: performance benchmarks",
+    "security: security related tests",
+    "ai: AI evaluation tests",
+]
+
+# coverage configuration
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = ["app/migrations/*", "app/__init__.py"]
+
+[tool.coverage.report]
+skip_covered = true
+precision = 2
+show_missing = true
+fail_under = 0
+
+# build system (PEP 517)
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"

@@ -58,6 +58,7 @@ class StreamingChatRequest(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(None, ge=0.0, le=1.0)
     max_tokens: Optional[int] = Field(None, gt=0)
+    runtime_version: str = Field("AgentCorp V1")
 
     # Future-compatibility placeholders
     tool_choice: Optional[str] = Field(

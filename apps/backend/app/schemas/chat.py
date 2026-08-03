@@ -99,6 +99,10 @@ class ChatBaseRequest(BaseModel):
         gt=0,
         description="Maximum number of completion tokens",
     )
+    runtime_version: str = Field(
+        "AgentCorp V1",
+        description="Selected runtime version for this request",
+    )
     stream: bool = Field(
         False,
         description="Request a streaming response (reserved — not yet active)",
@@ -144,6 +148,7 @@ class ChatRegenerateRequest(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(None, ge=0.0, le=1.0)
     max_tokens: Optional[int] = Field(None, gt=0)
+    runtime_version: str = Field("AgentCorp V1")
     stream: bool = Field(False)
 
 
@@ -159,6 +164,7 @@ class ChatRetryRequest(BaseModel):
 
     provider: Optional[str] = Field(None, description="Override provider for retry")
     model: Optional[str] = Field(None, description="Override model for retry")
+    runtime_version: str = Field("AgentCorp V1")
 
 
 class ConversationQueryParams(BaseModel):
@@ -186,6 +192,7 @@ class ChatResponseSchema(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     conversation_id: int = Field(..., description="Identifier of the conversation")
+    runtime_version: Optional[str] = Field(None, description="Selected runtime version for the request")
     assistant_message: AssistantMessageSchema = Field(..., description="The generated assistant message")
     provider: str = Field(..., description="Provider that produced the response")
     model: str = Field(..., description="Model used for generation")
@@ -222,6 +229,7 @@ class ConversationDetailSchema(BaseModel):
 
     conversation_id: int
     title: Optional[str]
+    runtime_version: Optional[str]
     agent_id: int
     organization_id: int
     user_id: int

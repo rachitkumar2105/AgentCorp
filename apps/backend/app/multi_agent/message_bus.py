@@ -11,12 +11,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from typing import Callable, Awaitable
+from typing import Callable, Awaitable, DefaultDict
 
 logger = logging.getLogger("multi_agent.message_bus")
 
 # In-memory subscriber registry: session_id -> list[callbacks]
-_subscribers: dict[int, list[Callable[[dict], Awaitable[None]]]] = defaultdict(list)
+
+
+# In-memory subscriber registry: session_id -> list[callbacks]
+_subscribers: DefaultDict[int, list[Callable[[dict], Awaitable[None]]]] = defaultdict(list)
 
 
 class MessageBus:
@@ -48,11 +51,17 @@ class MessageBus:
         interrupt delivery to other subscribers.
         """
         callbacks = list(_subscribers.get(session_id, []))
-        tasks = [asyncio.create_task(cb(message)) for cb in callbacks]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for result in results:
-            if isinstance(result, Exception):
-                logger.warning("MessageBus delivery error: %s", result)
+        if not callbacks:
+            return
+        try:
+            import anyio
+            async with anyio.create_task_group() as tg:
+                for cb in callbacks:
+                    tg.start_soon(cb, message)
+        except Exception as exc:
+            logger.warning("MessageBus delivery error: %s", exc)
+
+
 
     def clear_session(self, session_id: int) -> None:
         """Remove all subscribers for a completed session."""

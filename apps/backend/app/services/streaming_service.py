@@ -34,7 +34,7 @@ from fastapi import HTTPException, status
 from app.models.agent import Agent
 from app.models.conversation import Conversation
 from app.models.user import User
-from app.providers.schemas import ChatRequest
+from app.providers.schemas import ChatRequest, ToolDefinition, ToolParameter
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
@@ -44,8 +44,13 @@ from app.schemas.streaming import (
     StreamingUsage,
 )
 from app.services.context_builder import ContextBuilder
+from app.services.knowledge_service import KnowledgeService
+from app.services.memory_service import MemoryService
 from app.services.prompt_builder import PromptBuilder
 from app.services.provider_service import ProviderService
+from app.services.rag_service import RAGService
+from app.services.tool_execution_service import ToolExecutionService
+from app.schemas.tool_execution import ToolMetadata
 from app.utils.stream_events import (
     StreamMetrics,
     decrement_active,
@@ -80,6 +85,10 @@ class StreamingService:
         provider_service: ProviderService,
         context_builder: ContextBuilder,
         prompt_builder: PromptBuilder,
+        memory_service: MemoryService | None = None,
+        knowledge_service: KnowledgeService | None = None,
+        rag_service: RAGService | None = None,
+        tool_execution_service: ToolExecutionService | None = None,
     ) -> None:
         self._conversations = conversation_repo
         self._messages = message_repo
@@ -87,6 +96,10 @@ class StreamingService:
         self._provider_service = provider_service
         self._context_builder = context_builder
         self._prompt_builder = prompt_builder
+        self._memory_service = memory_service
+        self._knowledge_service = knowledge_service
+        self._rag_service = rag_service
+        self._tool_execution_service = tool_execution_service
 
     # ------------------------------------------------------------------
     # Public streaming entry points
@@ -119,6 +132,7 @@ class StreamingService:
             agent_id=agent.id,
             user_id=current_user.id,
             title=payload.message[:100],
+            runtime_version=payload.runtime_version,
         )
         conversation = self._conversations.create(conversation)
 
@@ -188,6 +202,11 @@ class StreamingService:
             # ---- 1. Snapshot history before adding the new user message ----
             history_before = self._messages.get_by_conversation(conversation.id)
             context = self._context_builder.build_context(history_before)
+            runtime_context = await self._build_runtime_context(
+                organization_id=conversation.organization_id,
+                agent_id=agent.id,
+                user_message=payload.message,
+            )
 
             # ---- 2. Persist user message ----
             self._messages.create_user_message(
@@ -208,6 +227,9 @@ class StreamingService:
                 system_prompt=agent.system_prompt,
                 history=context,
                 new_user_message=payload.message,
+                memory_context=runtime_context["memory_context"],
+                knowledge_context=runtime_context["knowledge_context"],
+                tool_context=runtime_context["tool_context"],
             )
 
             chat_request = ChatRequest(
@@ -217,6 +239,7 @@ class StreamingService:
                 max_tokens=resolved_max_tokens,
                 top_p=payload.top_p,
                 stream=True,
+                tools=runtime_context["tools"],
             )
 
             # ---- 4. Open provider stream ----
@@ -347,6 +370,110 @@ class StreamingService:
     # Validation helpers (mirror ChatService — no shared base needed)
     # ------------------------------------------------------------------
 
+    async def _build_runtime_context(
+        self,
+        *,
+        organization_id: int,
+        agent_id: int,
+        user_message: str,
+    ) -> dict:
+        tool_metadata = self._discover_tool_metadata(
+            agent_id=agent_id,
+            organization_id=organization_id,
+        )
+        return {
+            "memory_context": await self._retrieve_memory_context(
+                organization_id=organization_id,
+                agent_id=agent_id,
+                query=user_message,
+            ),
+            "knowledge_context": await self._retrieve_knowledge_context(
+                organization_id=organization_id,
+                query=user_message,
+            ),
+            "tool_context": self._format_tool_context(tool_metadata),
+            "tools": self._to_provider_tool_definitions(tool_metadata),
+        }
+
+    async def _retrieve_memory_context(self, *, organization_id: int, agent_id: int, query: str) -> str | None:
+        if self._memory_service is None:
+            return None
+        try:
+            memories = await self._memory_service.retrieve_memories(
+                org_id=organization_id,
+                agent_id=agent_id,
+                query=query,
+                top_k=5,
+            )
+        except Exception as exc:
+            logger.warning("memory retrieval skipped | org_id=%s agent_id=%s error=%s", organization_id, agent_id, exc)
+            return None
+        if not memories:
+            return None
+        return "\n".join(f"- {m.title}: {m.content}" if m.title else f"- {m.content}" for m in memories)
+
+    async def _retrieve_knowledge_context(self, *, organization_id: int, query: str) -> str | None:
+        if self._knowledge_service is None or self._rag_service is None:
+            return None
+        try:
+            knowledge_bases = self._knowledge_service.list_knowledge_bases(organization_id)
+        except Exception as exc:
+            logger.warning("knowledge base discovery skipped | org_id=%s error=%s", organization_id, exc)
+            return None
+
+        contexts: list[str] = []
+        for kb in knowledge_bases:
+            try:
+                context = await self._rag_service.retrieve_context(
+                    kb_id=kb.id,
+                    query=query,
+                    top_k=5,
+                    max_tokens=2000,
+                )
+            except Exception as exc:
+                logger.warning("rag retrieval skipped | org_id=%s kb_id=%s error=%s", organization_id, kb.id, exc)
+                continue
+            if context:
+                contexts.append(f"Knowledge base: {kb.name}\n{context}")
+        return "\n\n".join(contexts) if contexts else None
+
+    def _discover_tool_metadata(self, *, agent_id: int, organization_id: int) -> list[ToolMetadata]:
+        if self._tool_execution_service is None:
+            return []
+        try:
+            return self._tool_execution_service.discover_agent_tools(
+                agent_id=agent_id,
+                organization_id=organization_id,
+                current_user=_ServiceUserProxy(),
+            )
+        except Exception as exc:
+            logger.warning("tool discovery skipped | org_id=%s agent_id=%s error=%s", organization_id, agent_id, exc)
+            return []
+
+    def _format_tool_context(self, tool_metadata: list[ToolMetadata]) -> str | None:
+        if not tool_metadata:
+            return None
+        return "\n".join(f"- {tool.name}: {tool.description}" for tool in tool_metadata)
+
+    def _to_provider_tool_definitions(self, tool_metadata: list[ToolMetadata]) -> list[ToolDefinition]:
+        definitions: list[ToolDefinition] = []
+        for tool in tool_metadata:
+            parameters = {
+                name: ToolParameter(
+                    type=param.type,
+                    description=param.description,
+                    enum=param.enum,
+                )
+                for name, param in tool.parameters.properties.items()
+            }
+            definitions.append(ToolDefinition(
+                name=tool.name,
+                description=tool.description,
+                parameters=parameters,
+                required=tool.parameters.required,
+            ))
+        return definitions
+
     def _validate_conversation(
         self,
         conversation_id: int,
@@ -393,3 +520,8 @@ class StreamingService:
             )
 
         return agent
+
+
+class _ServiceUserProxy:
+    def __init__(self) -> None:
+        self.is_superuser = True

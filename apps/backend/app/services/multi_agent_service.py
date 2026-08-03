@@ -26,6 +26,7 @@ from app.multi_agent.coordinator import Coordinator
 from app.multi_agent.delegation import DelegationEngine
 from app.multi_agent.context_manager import SharedContextManager
 from app.multi_agent.message_bus import message_bus
+from app.multi_agent.orchestrator import MultiAgentOrchestrator, ResultAggregator
 from app.multi_agent.exceptions import (
     SessionNotFoundError,
     AgentNotParticipantError,
@@ -44,7 +45,10 @@ from app.repositories.multi_agent_repository import (
     AgentDelegationRepository,
 )
 from app.services.agent_engine_service import AgentEngineService
+from app.runtime.goal_management import GoalEngine
+from app.runtime.task_management import TaskManager
 from app.models.user import User
+from app.observability.diagnostics import register_multi_agent_orchestration
 
 logger = logging.getLogger("multi_agent_service")
 
@@ -63,6 +67,10 @@ class MultiAgentService:
         self.coordinator = Coordinator()
         self.delegation_engine = DelegationEngine()
         self.agent_engine = AgentEngineService(db)
+        self.goal_engine = GoalEngine()
+        self.task_manager = TaskManager()
+        self.result_aggregator = ResultAggregator()
+        self.orchestrator = None
 
     # ------------------------------------------------------------------ #
     # Session lifecycle                                                    #
@@ -160,6 +168,75 @@ class MultiAgentService:
                 "goal": session.goal,
             },
         )
+        participants = self.participant_repo.list_by_session(session_id)
+        service_user = _SessionUserProxy(id=session.created_by)
+        for participant in participants:
+            participant.status = "RUNNING"
+            self.participant_repo.update(participant)
+            await message_bus.publish(
+                session_id,
+                {
+                    "event": "participant_started",
+                    "session_id": session_id,
+                    "agent_id": participant.agent_id,
+                    "sub_task": participant.sub_task,
+                },
+            )
+            try:
+                goal = self.agent_engine.create_goal(
+                    name=f"{session.name}: agent {participant.agent_id}",
+                    description=participant.sub_task,
+                    objective=participant.sub_task,
+                    priority="medium",
+                    success_criteria=session.goal,
+                    organization_id=organization_id,
+                    agent_id=participant.agent_id,
+                    conversation_id=None,
+                    user_id=session.created_by,
+                )
+                execution = await self.agent_engine.execute_goal(
+                    goal_id=goal.id,
+                    organization_id=organization_id,
+                    current_user=service_user,
+                )
+                participant.status = "COMPLETED" if execution.status == "COMPLETED" else "FAILED"
+                participant.result = {
+                    "goal_id": goal.id,
+                    "execution_id": execution.id,
+                    "status": execution.status,
+                    "execution_context": execution.execution_context,
+                }
+                participant.completed_at = datetime.now(timezone.utc)
+                self.participant_repo.update(participant)
+                await message_bus.publish(
+                    session_id,
+                    {
+                        "event": "participant_completed",
+                        "session_id": session_id,
+                        "agent_id": participant.agent_id,
+                        "status": participant.status,
+                        "result": participant.result,
+                    },
+                )
+            except Exception as exc:
+                participant.status = "FAILED"
+                participant.result = {"error": str(exc)}
+                participant.completed_at = datetime.now(timezone.utc)
+                self.participant_repo.update(participant)
+                await message_bus.publish(
+                    session_id,
+                    {
+                        "event": "participant_failed",
+                        "session_id": session_id,
+                        "agent_id": participant.agent_id,
+                        "error": str(exc),
+                    },
+                )
+
+        participant_statuses = [participant.status for participant in self.participant_repo.list_by_session(session_id)]
+        if self.coordinator.is_session_complete(participant_statuses):
+            return await self.complete_session(organization_id, session_id)
+
         logger.info("Started multi-agent session %d", session_id)
         return session
 
@@ -219,6 +296,42 @@ class MultiAgentService:
         session.shared_context = ctx.snapshot()
         self.session_repo.update(session)
         return session
+
+    async def orchestrate_goal(
+        self,
+        organization_id: int,
+        session_id: int,
+        current_user: User,
+        runtime_v2: Any,
+    ) -> dict[str, Any]:
+        session = self.get_session(organization_id, session_id)
+        goal = self.goal_engine.create_goal(
+            title=session.name,
+            objective=session.goal,
+            owner_id=session.created_by,
+            organization_id=session.organization_id,
+            metadata={"session_id": session_id, "source": "multi_agent"},
+        )
+        orchestrator = MultiAgentOrchestrator(runtime_v2=runtime_v2, multi_agent_service=self, task_manager=self.task_manager)
+        report = await orchestrator.orchestrate_goal(
+            goal=goal,
+            supervisor_agent_id=session.coordinator_agent_id,
+            worker_agent_ids=tuple(p.agent_id for p in self.participant_repo.list_by_session(session_id) if p.agent_id != session.coordinator_agent_id),
+            current_user=current_user,
+            organization_id=organization_id,
+            session_id=session_id,
+        )
+        await register_multi_agent_orchestration(
+            str(session_id),
+            {
+                "session_id": session_id,
+                "goal_id": report.goal.goal_id,
+                "aggregation_summary": report.aggregation_summary,
+                "supervisor_agent_id": report.supervisor_agent_id,
+                "worker_agent_count": len(report.shared_context.participating_agents) - 1,
+            },
+        )
+        return report.metadata | {"aggregation_summary": report.aggregation_summary}
 
     # ------------------------------------------------------------------ #
     # Delegation                                                           #
@@ -358,3 +471,9 @@ class MultiAgentService:
         if status in ("COMPLETED", "FAILED"):
             participant.completed_at = datetime.now(timezone.utc)
         return self.participant_repo.update(participant)
+
+
+class _SessionUserProxy:
+    def __init__(self, id: int) -> None:
+        self.id = id
+        self.is_superuser = True

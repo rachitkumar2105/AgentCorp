@@ -843,6 +843,8 @@ This project is licensed under the terms of the [LICENSE](LICENSE) file included
 
 **Rachit Kumar**
 
+Email: rachitkumar2105@gmail.com
+
 GitHub: [https://github.com/rachitkumar2105](https://github.com/rachitkumar2105)
 
 Project: [AgentCorp](https://github.com/rachitkumar2105/AgentCorp)
